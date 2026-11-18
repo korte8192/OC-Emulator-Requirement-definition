@@ -6,12 +6,12 @@ from groq import Groq
 
 app = FastAPI(title="Character Emulator API")
 
-# Groqクライアントの初期化
 client = Groq(api_key=os.environ.get("GROQ_API_KEY", "YOUR_GROQ_API_KEY"))
 
-# ---- リクエストのデータ型定義 ----
+#ユーザー入力基本情報
 class UserInput(BaseModel):
-    name: str
+    memo: str=""
+    name: str = ""
     first_p: str = ""
     second_p: str = ""
     talk_style: str = ""
@@ -23,7 +23,7 @@ class UserInput(BaseModel):
     suki: str = ""
     kirai: str = ""
     traumatic: str = ""
-    most_storong_ep: str = ""
+    most_strong_ep: str = ""
     user: str = ""
     user_distance: str = ""
     role: str = ""
@@ -32,24 +32,31 @@ class UserInput(BaseModel):
     pow_val: str = ""
     sp: str = ""
 
+#チャットする際に送られてくるデータ
 class ChatRequest(BaseModel):
-    master_data: dict  # キャラクターのマスターデータ
+    #master_data: dict  # キャラクターのマスターデータ
     user_message: str   # ユーザーの入力発言
-    history: list = []  # これまでの会話履歴
+    #history: list = []  # これまでの会話履歴
+    userId: str=""
 
-# ---- エンドポイント 1: master_dataの全自動補完生成 ----
+#最初のキャラ設定補完システム
 @app.post("/generate-master")
 def generate_master(input_data: UserInput):
     user_dict = input_data.model_dump()
+
+    for key, value in user_dict.items():
+        if not value and key not in ("traumatic","most_strong_ep"):
+            user_dict[key] = "【要AI補完】"
     
     system_instruction = """
 あなたはオリジナルキャラクターの設定を補完するアシスタントです。
-入力されたキャラクターデータのうち、値が空文字列 "" になっている項目を、既に入力されている情報から整合性が取れるように推測・補完してください。
+入力されたキャラクターデータのうち、値が"【要AI補完】"になっている項目を、既に入力されている情報から整合性が取れるように推測・補完してください。
 
 【補完の厳格ルール】
 1. "traumatic"（トラウマ）および "most_storong_ep"（最も強く印象に残ってるエピソード）が空欄の場合は、捏造せず必ず "不明/なし" と出力してください。
 2. 既に入力されている項目は絶対に書き換えず、そのまま維持してください。
 3. 出力は必ず指定されたJSONフォーマットのみで行ってください。
+4. 補完したものには【補完済み】と末尾に記載してください
 """
     prompt = f"以下のキャラクター設定の空欄部分を補完してください:\n{json.dumps(user_dict, ensure_ascii=False)}"
 
@@ -68,16 +75,18 @@ def generate_master(input_data: UserInput):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# ---- エンドポイント 2: 会話エミュレート ----
+@app.post("/OCbrain")
+def OCbrain(req: )
+
 @app.post("/chat")
 def chat(req: ChatRequest):
     m = req.master_data
     
-    # 前に作成したシステム構造をそのまま使用！
     system_prompt = f"""
 あなたは以下の定義に従い、指定されたキャラクターになりきって会話してください。もし定義されていなかった場合は他から類推し補完してください。
 
 【基本情報】
+- メモ: {m.get('memo','')}
 - 名前: {m.get('name', '')}
 - 一人称: {m.get('first_p', '')}
 - 二人称: {m.get('second_p', '')}
@@ -112,6 +121,8 @@ def chat(req: ChatRequest):
 2. 指示された一人称・二人称・口調を常に維持してください。
 3. 感情表現や行動描写は（）等の括弧書きで文中に挿入可能です。
 4. 一般的な項目は補完してよいが、トラウマ・エピソードは未入力なら『不明/なし』として扱い捏造しない。
+5. ユーザーが変更依頼を出さない限りユーザーが入力した基本情報を変えずに、末尾が【補完済み】の所はユーザーとの会話で変えていってもかまいません。ですが変える際は【補完済み】を末尾につけてください。
+6. 【補完済み】を返答に記載しないよう注意してください。
 """
 
     messages = [{"role": "system", "content": system_prompt}]
