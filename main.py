@@ -35,18 +35,23 @@ class UserInput(BaseModel):
 #チャットする際に送られてくるデータ
 class ChatRequest(BaseModel):
     #master_data: dict  # キャラクターのマスターデータ
-    user_message: str   # ユーザーの入力発言
+    #user_message: str   # ユーザーの入力発言
     #history: list = []  # これまでの会話履歴
     userId: str=""
+    user_message: str
+
+class 
 
 #最初のキャラ設定補完システム
 @app.post("/generate-master")
 def generate_master(input_data: UserInput):
-    user_dict = input_data.model_dump()
+    user_dict = input_data.model_dump() #baseからdictに
+    ai_support_key=[] #AIが補完した項目をまとめたもの
 
     for key, value in user_dict.items():
         if not value and key not in ("traumatic","most_strong_ep"):
             user_dict[key] = "【要AI補完】"
+            ai_support_key.append(key)
     
     system_instruction = """
 あなたはオリジナルキャラクターの設定を補完するアシスタントです。
@@ -71,12 +76,86 @@ def generate_master(input_data: UserInput):
             response_format={"type": "json_object"}
         )
         master_data = json.loads(response.choices[0].message.content)
+        master_data["AI_support"]=ai_support_key
+
         return {"status": "success", "master_data": master_data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/OCbrain")
-def OCbrain(req: )
+#chatのif文で10件ごとに起動
+def OCshort_term(user_id: str,recent_messages: list[dict]):
+        #会話履歴10件ごとの要約作成、マスターデータ更新
+
+    with open(f"user_data/{user_id}/master_data.json","r",encoding="utf-8") as f:
+        master_data=json.load(f)
+
+    neuron=f"""貴方は会話ログとmaster_dataを整理し、キャラクターデータが最新状態であることを維持するAIアシスタントです。 
+        送られた10件の会話データとmaster_dataを基に以下の２点をjson形式で出力してください。
+        
+        1. "summary":会話の重要な出来事や約束、感情の変化を簡潔に要約する。
+        2. "master_update" :会話の出来事やユーザーとの対話を通じて、更新が必要な項目を考え、その項目名がmaster_data内のAI_supportの中に存在した場合のみ、現在のマスターデータのキー名を使って変更後の値を入れること。
+
+        【厳格ルール】
+        - 変更・追加すべき設定が何もない場合は、"master_update" は必ず空の辞書 {{}} にすること。
+        - ユーザーから明確な変更依頼がない限り、master_data[AI_support]内にない項目名の基本設定を勝手に書き換えないこと。
+        - 存在しないキー名は作らず、現在のマスターデータにあるキー名のみ使用すること。
+
+        【現在のマスターデータ】
+        {json.dumps(master_data, ensure_ascii=False)}
+
+        【出力JSONフォーマット】
+        {{
+          "summary": "要約テキスト",
+          "master_update": {{ "更新するキー": "新しい値" }}
+        }}
+
+        """
+
+    prompt=f"以下の会話履歴を要約し、必要なら設定を更新してください:\n{json.dumps(recent_messages, ensure_ascii=False)}"
+
+    try:
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": neuron},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.3,
+            response_format={"type": "json_object"}
+        )
+        return_data = json.loads(response.choices[0].message.content)
+        
+        #summary変換
+        with open(f"user_data/{user_id}/summaries.json","r",encoding="utf-8") as f:
+            summaries_dict=json.load(f)
+
+        nowIndex=len(summaries_dict["summaries"])
+        if nowIndex== 10:
+            nowIndex=1
+            OClong_term()#引数未定、要約を必ず10件にとどめる仕組み
+
+        summaries_dict["summaries"].append({"index":nowIndex+1,"summary":return_data["summary"]})
+
+        with open(f"user_data/{user_id}/summaries.json","w",encoding="utf-8") as f:
+            json.dump(summaries_dict,f,ensure_ascii=False,indent=2)
+
+
+        #master_data AIから返ってきたのは master_update{"キー":"変更内容"}
+        ai_support_list=master_data["AI_support"]
+        updates=return_data.get("master_update",{})
+
+        for key,value in updates.items():
+            if key in ai_support_list and key in master_data and value:
+                master_data[key]=val
+
+        with open(f"user_data/{user_id}/master_data.json","w",encoding="utf-8") as f:
+            json.dump(master_data,f,ensure_ascii=False,indent=2)
+
+        return {"status": "success", "master_data": master_data}
+    except Exception as e:
+        print("エラーショートターム")
+        return {"status": "error", "detail": str(e)}
+
 
 @app.post("/chat")
 def chat(req: ChatRequest):
@@ -103,7 +182,7 @@ def chat(req: ChatRequest):
 - 好きなもの: {m.get('suki', '')}
 - 嫌いなもの: {m.get('kirai', '')}
 - トラウマ: {m.get('traumatic', '')}
-- 最も強く印象に残ってるエピソード: {m.get('most_storong_ep', '')}
+- 最も強く印象に残ってるエピソード: {m.get('most_strong_ep', '')}
 
 【対話者との関係】
 - 対話者: {m.get('user', '')}
