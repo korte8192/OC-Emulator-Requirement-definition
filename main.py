@@ -7,9 +7,11 @@ from groq import Groq
 app = FastAPI(title="Character Emulator API")
 
 client = Groq(api_key=os.environ.get("GROQ_API_KEY", "YOUR_GROQ_API_KEY"))
+MODEL_NAME = "qwen/qwen3.8-27b"
 
 #ユーザー入力基本情報
 class UserInput(BaseModel):
+    user_id: str
     memo: str=""
     name: str = ""
     first_p: str = ""
@@ -40,13 +42,12 @@ class ChatRequest(BaseModel):
     userId: str=""
     user_message: str
 
-class 
-
-#最初のキャラ設定補完システム
+#最初のキャラ設定補完システム kotlinに補完データ返したうえでpython内に保存もする
 @app.post("/generate-master")
 def generate_master(input_data: UserInput):
     user_dict = input_data.model_dump() #baseからdictに
     ai_support_key=[] #AIが補完した項目をまとめたもの
+    user_id=input_data.user_id
 
     for key, value in user_dict.items():
         if not value and key not in ("traumatic","most_strong_ep"):
@@ -61,13 +62,12 @@ def generate_master(input_data: UserInput):
 1. "traumatic"（トラウマ）および "most_storong_ep"（最も強く印象に残ってるエピソード）が空欄の場合は、捏造せず必ず "不明/なし" と出力してください。
 2. 既に入力されている項目は絶対に書き換えず、そのまま維持してください。
 3. 出力は必ず指定されたJSONフォーマットのみで行ってください。
-4. 補完したものには【補完済み】と末尾に記載してください
 """
     prompt = f"以下のキャラクター設定の空欄部分を補完してください:\n{json.dumps(user_dict, ensure_ascii=False)}"
 
     try:
         response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model=MODEL_NAME,
             messages=[
                 {"role": "system", "content": system_instruction},
                 {"role": "user", "content": prompt}
@@ -78,9 +78,78 @@ def generate_master(input_data: UserInput):
         master_data = json.loads(response.choices[0].message.content)
         master_data["AI_support"]=ai_support_key
 
+        user_dir = f"user_data/{user_id}"
+        os.makedirs(user_dir, exist_ok=True)
+
+        with open(f"{user_dir}/master_data.json", "w", encoding="utf-8") as f:
+            json.dump(master_data, f, ensure_ascii=False, indent=2)
+
+        #空のhistory
+        with open(f"{user_dir}/history.json", "w", encoding="utf-8") as f:
+            json.dump({"history":[]}, f, ensure_ascii=False, indent=2)
+
+        #空のsummary
+        with open(f"{user_dir}/summaries.json", "w", encoding="utf-8") as f:
+            json.dump({"summaries": []}, f, ensure_ascii=False, indent=2)
+
         return {"status": "success", "master_data": master_data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+
+def OClong_term(user_id: str):
+    with open(f"user_data/{user_id}/summaries.json","r",encoding="utf-8") as f:
+        summaries_dict=json.load(f)
+
+    with open(f"user_data/{user_id}/master_data.json","r",encoding="utf-8") as f:
+        master_data=json.load(f)
+
+    neuron=f""" 貴方は10件の要約データを統合し、その内容の重要な事、要約すべき内容をまとめ１つの要約データにまとめるAIアシスタントです。
+    【絶対ルール】
+- 入力データにない設定・事実・推測を作り出さないこと。
+- キャラクターデータに基づき、そのキャラクターにとって重要な出来事・関係性・変化・事実を優先して残すこと。
+- 10件の内容を重複なく整理し、1つの要約（index: 1）にまとめること。
+- 出力は必ず指定のJSON形式のみとし、説明文や ```json などの囲みは含めないこと。
+
+    【キャラクターデータ】
+    {json.dumps(master_data, ensure_ascii=False,indent=2)}
+
+    【まとめるべき10件の要約データ】
+    {json.dumps(summaries_dict,ensure_ascii=False,indent=2)}
+
+    【出力jsonフォーマット】
+    {{
+        "summaries":[
+            {{
+                "index":1,
+                "summary":"10件の内容を統合した要約テキスト"
+            }}
+        ]
+    }}
+
+    """
+    prompt=f"""  {json.dumps(summaries_dict,ensure_ascii=False,indent=2)}を基に10件の要約データを1件に統合してください。"""
+
+    try:
+        response = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": neuron},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.3,
+            response_format={"type": "json_object"}
+        )
+        return_data = json.loads(response.choices[0].message.content)
+        with open(f"user_data/{user_id}/summaries.json","w",encoding="utf-8") as f:
+            json.dump(return_data,f,ensure_ascii=False,indent=2)
+
+    except Exception as e:
+        print("エラーロングターム")
+        return {"status": "error", "detail": str(e)}
+
+
 
 #chatのif文で10件ごとに起動
 def OCshort_term(user_id: str,recent_messages: list[dict]):
@@ -88,17 +157,18 @@ def OCshort_term(user_id: str,recent_messages: list[dict]):
 
     with open(f"user_data/{user_id}/master_data.json","r",encoding="utf-8") as f:
         master_data=json.load(f)
+        
 
     neuron=f"""貴方は会話ログとmaster_dataを整理し、キャラクターデータが最新状態であることを維持するAIアシスタントです。 
         送られた10件の会話データとmaster_dataを基に以下の２点をjson形式で出力してください。
         
-        1. "summary":会話の重要な出来事や約束、感情の変化を簡潔に要約する。
-        2. "master_update" :会話の出来事やユーザーとの対話を通じて、更新が必要な項目を考え、その項目名がmaster_data内のAI_supportの中に存在した場合のみ、現在のマスターデータのキー名を使って変更後の値を入れること。
+1. "summary":会話の重要な出来事や約束、感情の変化を簡潔に要約する。
+2. "master_update" :会話の出来事やユーザーとの対話を通じて、更新が必要な項目を考え、その項目名がmaster_data内のAI_supportの中に存在した場合のみ、現在のマスターデータのキー名を使って変更後の値を入れること。
 
         【厳格ルール】
-        - 変更・追加すべき設定が何もない場合は、"master_update" は必ず空の辞書 {{}} にすること。
-        - ユーザーから明確な変更依頼がない限り、master_data[AI_support]内にない項目名の基本設定を勝手に書き換えないこと。
-        - 存在しないキー名は作らず、現在のマスターデータにあるキー名のみ使用すること。
+- 変更・追加すべき設定が何もない場合は、"master_update" は必ず空の辞書 {{}} にすること。
+- ユーザーから明確な変更依頼がない限り、master_data[AI_support]内にない項目名の基本設定を勝手に書き換えないこと。
+- 存在しないキー名は作らず、現在のマスターデータにあるキー名のみ使用すること。
 
         【現在のマスターデータ】
         {json.dumps(master_data, ensure_ascii=False)}
@@ -115,7 +185,7 @@ def OCshort_term(user_id: str,recent_messages: list[dict]):
 
     try:
         response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model=MODEL_NAME,
             messages=[
                 {"role": "system", "content": neuron},
                 {"role": "user", "content": prompt},
@@ -130,9 +200,11 @@ def OCshort_term(user_id: str,recent_messages: list[dict]):
             summaries_dict=json.load(f)
 
         nowIndex=len(summaries_dict["summaries"])
-        if nowIndex== 10:
+        if nowIndex >= 10:
             nowIndex=1
-            OClong_term()#引数未定、要約を必ず10件にとどめる仕組み
+            OClong_term(user_id)#引数未定、要約を必ず10件にとどめる仕組み
+            with open(f"user_data/{user_id}/summaries.json","r",encoding="utf-8") as f:
+                summaries_dict=json.load(f)
 
         summaries_dict["summaries"].append({"index":nowIndex+1,"summary":return_data["summary"]})
 
@@ -146,7 +218,7 @@ def OCshort_term(user_id: str,recent_messages: list[dict]):
 
         for key,value in updates.items():
             if key in ai_support_list and key in master_data and value:
-                master_data[key]=val
+                master_data[key]=value
 
         with open(f"user_data/{user_id}/master_data.json","w",encoding="utf-8") as f:
             json.dump(master_data,f,ensure_ascii=False,indent=2)
@@ -157,12 +229,25 @@ def OCshort_term(user_id: str,recent_messages: list[dict]):
         return {"status": "error", "detail": str(e)}
 
 
+
+
 @app.post("/chat")
 def chat(req: ChatRequest):
-    m = req.master_data
+    user_id=req.userId
+    user_message=req.user_message
+
+    with open(f"user_data/{user_id}/master_data.json","r",encoding="utf-8") as f:
+        m=json.load(f)
+
+    with open(f"user_data/{user_id}/history.json","r",encoding="utf-8") as f:
+        history_data=json.load(f)
+
+    with open(f"user_data/{user_id}/summaries.json","r",encoding="utf-8") as f:
+        summary_data=json.load(f)
     
+
     system_prompt = f"""
-あなたは以下の定義に従い、指定されたキャラクターになりきって会話してください。もし定義されていなかった場合は他から類推し補完してください。
+あなたは以下の定義と今までの会話履歴の要約データ、直近の会話履歴をもとに指定されたキャラクターになりきって会話してください。
 
 【基本情報】
 - メモ: {m.get('memo','')}
@@ -195,30 +280,37 @@ def chat(req: ChatRequest):
 - 精神力: {m.get('pow_val', m.get('pow', ''))}
 - 特殊能力: {m.get('sp', '')}
 
+【これまでの出来事（要約データ）】
+{json.dumps(summary_data.get("summaries",[]), ensure_ascii=False)}
+
 【絶対ルール】
 1. AIやアシスタントとしてのメタ発言、自己言及は厳禁です。
 2. 指示された一人称・二人称・口調を常に維持してください。
 3. 感情表現や行動描写は（）等の括弧書きで文中に挿入可能です。
-4. 一般的な項目は補完してよいが、トラウマ・エピソードは未入力なら『不明/なし』として扱い捏造しない。
-5. ユーザーが変更依頼を出さない限りユーザーが入力した基本情報を変えずに、末尾が【補完済み】の所はユーザーとの会話で変えていってもかまいません。ですが変える際は【補完済み】を末尾につけてください。
-6. 【補完済み】を返答に記載しないよう注意してください。
+4. トラウマ・エピソードが『不明/なし』の場合は捏造しないでください。
+5. {m.get('AI_support', [])} に含まれる項目は会話の流れで変化させて構いませんが、それ以外の基本設定はユーザーが変更依頼を出さない限り守ってください。
 """
 
     messages = [{"role": "system", "content": system_prompt}]
-    # 会話履歴を追加
-    for h in req.history:
-        messages.append(h)
-    # 今回の発言を追加
-    messages.append({"role": "user", "content": req.user_message})
+    messages.extend(history_data["history"][-18:])
+    messages.append({"role": "user", "content": user_message})
 
     try:
         response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model=MODEL_NAME,
             messages=messages,
             temperature=0.7,
             max_tokens=300
         )
         reply = response.choices[0].message.content
+            # 今回の発言を追加
+        history_data["history"].append({"role":"user","content":user_message})
+        history_data["history"].append({"role":"assistant","content":reply})
+
+        with open(f"user_data/{user_id}/history.json","w",encoding="utf-8") as f:
+            json.dump(history_data,f,ensure_ascii=False,indent=2)
+        if len(history_data["history"]) %20==0 and len(history_data["history"])>0:
+            OCshort_term(user_id,history_data["history"][-20:])
         return {"status": "success", "reply": reply}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
